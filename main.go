@@ -23,6 +23,7 @@ import (
 var URL string
 var customerAndGameUrl string
 var gameAndCustomers string
+var wDb string
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
@@ -35,6 +36,7 @@ func init() {
 	URL = os.Getenv("GEARBOX_URL")
 	customerAndGameUrl = os.Getenv("MONGO_CUSTOMER_AND_GAME_URL")
 	gameAndCustomers = os.Getenv("GAME_AND_CUSTOMERS")
+	wDb = os.Getenv("WRITTEN_DB")
 }
 
 func (conn *Conn) GameID(versionId string) (Game, error) {
@@ -141,7 +143,7 @@ func main() {
 }
 
 func (conn *Conn) Runner(ctx context.Context, db *mongo.Database) {
-	aggrCol := db.Collection("aggragatedResults")
+	aggrCol := db.Collection(wDb)
 	for msg := range conn.signal {
 		fmt.Printf("msg %v\n", msg)
 
@@ -221,6 +223,8 @@ func (conn *Conn) looper(curCol string) {
 		fmt.Printf("couldn't connect %s collections: %v\n", curCol, err)
 	}
 
+	fmt.Println("maker")
+
 	fmt.Printf("current collection %s\n", curCol)
 	defer cursor.Close(conn.ctx)
 	start := time.Now()
@@ -234,6 +238,7 @@ func (conn *Conn) looper(curCol string) {
 		resp, _ := conn.GameID(result.Version)
 		res, _ := conn.CustomerID(result.Version)
 		i++
+		fmt.Println(i)
 		if resp.GameID != "" && res.CustomerID != "" {
 			conn.switchHandler(result, resp.GameID, res.CustomerID)
 		}
@@ -266,9 +271,9 @@ func (m *Conn) AggragateEvent(data RawType, keys []string, game string, customer
 	}
 	key = fmt.Sprintf("%s::%s", key, optionalEvent)
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
 	val, ok := m.store[key]
+	m.mu.RUnlock()
 	if !ok {
 		s := SettledType{
 			ID: IDType{
@@ -283,7 +288,10 @@ func (m *Conn) AggragateEvent(data RawType, keys []string, game string, customer
 			Customer: customer,
 			Value:    0,
 		}
+
+		m.mu.Lock()
 		m.store[key] = s
+		m.mu.Unlock()
 		val = s
 	}
 	var ev string
@@ -298,16 +306,16 @@ func (m *Conn) AggragateEvent(data RawType, keys []string, game string, customer
 		if !oldEvent && strings.Contains(ev, "Time") && ev != "totalTime" {
 			intValue += int(data.Time)
 			val.Value = intValue
-			m.store[key] = val
 		} else if oldEvent && strings.Contains(ev, "Time") {
 			intValue += int(data.Value)
 			val.Value = intValue
-			m.store[key] = val
 		} else {
 			intValue += 1
 			val.Value = intValue
-			m.store[key] = val
 		}
+		m.mu.Lock()
+		m.store[key] = val
+		m.mu.Unlock()
 	}
 
 }
@@ -318,7 +326,9 @@ func (conn *Conn) switchHandler(data RawType, game string, customer string) {
 		break
 	case "click":
 		conn.handleClick(data, game, customer)
-	case "cta", "ctaClick":
+	case "ctaClick":
+		conn.handleCtaClick(data, game, customer)
+	case "cta":
 		conn.handleCtaClick(data, game, customer)
 	case "end":
 		if data.Value == 0 {
@@ -382,15 +392,14 @@ func (conn *Conn) handleClick(d RawType, game string, customer string) {
 		conn.AggragateEvent(d, []string{"version", "network"}, game, customer, false, "firstClickTime")
 	}
 
-	conn.mu.Lock()
-	defer conn.mu.Unlock()
-
 	if len(d.Heatmap) > 0 {
 		if d.Time <= 60 {
 			day := DateFormat(d.Timestamp.Time())
 			key := fmt.Sprintf("%s::%s::%s::%s::heatmap", d.Version, d.Os, d.Network, day)
 
+			conn.mu.RLock()
 			val, ok := conn.store[key]
+			conn.mu.RUnlock()
 			if !ok {
 				v := SettledType{
 					ID: IDType{
@@ -404,7 +413,9 @@ func (conn *Conn) handleClick(d RawType, game string, customer string) {
 					Customer: customer,
 					Value:    PortAndLand{},
 				}
+				conn.mu.Lock()
 				conn.store[key] = v
+				conn.mu.Unlock()
 			}
 
 			portAndLand := PortAndLand{}
@@ -430,7 +441,9 @@ func (conn *Conn) handleClick(d RawType, game string, customer string) {
 				}
 			}
 			val.Value = portAndLand
+			conn.mu.Lock()
 			conn.store[key] = val
+			conn.mu.Unlock()
 		}
 	}
 
@@ -440,10 +453,12 @@ func (conn *Conn) handleCtaClick(data RawType, gameId string, customerId string)
 	day := DateFormat(data.ID.Timestamp())
 	key := fmt.Sprintf("%s::%s::%s::%s::ctaClick", data.Version, data.Os, data.Network, day)
 
-	conn.mu.Lock()
-	defer conn.mu.Unlock()
+	// conn.mu.TryLock()
+	// defer conn.mu.Unlock()
 
+	conn.mu.RLock()
 	v, ok := conn.store[key]
+	conn.mu.RUnlock()
 	if !ok {
 		s := SettledType{
 			ID: IDType{
@@ -462,7 +477,9 @@ func (conn *Conn) handleCtaClick(data RawType, gameId string, customerId string)
 			Game:     gameId,
 			Customer: customerId,
 		}
+		conn.mu.Lock()
 		conn.store[key] = s
+		conn.mu.Unlock()
 		v = s
 	}
 
@@ -478,7 +495,9 @@ func (conn *Conn) handleCtaClick(data RawType, gameId string, customerId string)
 			castedValue.Unknown += 1
 		}
 		v.Value = castedValue
+		conn.mu.Lock()
 		conn.store[key] = v
+		conn.mu.Unlock()
 	}
 
 	if data.Time <= 60 && data.Event == "cta" {
@@ -487,27 +506,29 @@ func (conn *Conn) handleCtaClick(data RawType, gameId string, customerId string)
 }
 
 func (c *Conn) Listener() {
-	gen := bson.M{
-		"name": bson.M{"$regex": primitive.Regex{
-			Pattern: "x00*",
-			Options: "i",
-		}},
-	}
+	// gen := bson.M{
+	// 	"name": bson.M{"$regex": primitive.Regex{
+	// 		Pattern: "x00*",
+	// 		Options: "i",
+	// 	}},
+	// }
 	for {
-		cols, err := c.client.ListCollectionNames(c.ctx, gen, &options.ListCollectionsOptions{
-			NameOnly: options.ListCollections().NameOnly,
-		})
-		counter := 0
-		for _, col := range cols {
-			count, err := c.client.Collection(col).CountDocuments(c.ctx, bson.D{})
-			if err != nil {
-				fmt.Printf("couldn't get length of document: %v\n", err)
-			}
-			if count >= 1e6 {
-				counter++
-				c.queue.PushBack(col)
-			}
-		}
+		// cols, err := c.client.ListCollectionNames(c.ctx, gen, &options.ListCollectionsOptions{
+		// 	NameOnly: options.ListCollections().NameOnly,
+		// })
+		// counter := 0
+		// for _, col := range cols {
+		// 	count, err := c.client.Collection(col).CountDocuments(c.ctx, bson.D{})
+		// 	if err != nil {
+		// 		fmt.Printf("couldn't get length of document: %v\n", err)
+		// 	}
+		// 	if count >= 1e6 {
+		// 		counter++
+		// 		c.queue.PushBack(col)
+		// 	}
+		// }
+
+		c.queue.PushBack("partial_data")
 
 		if c.queue.Len() != 0 {
 			cur := c.queue.Front()
@@ -516,9 +537,9 @@ func (c *Conn) Listener() {
 			c.queue.Remove(cur)
 		}
 
-		if err != nil {
-			panic(err)
-		}
+		// if err != nil {
+		// 	panic(err)
+		// }
 		time.Sleep(time.Hour * 1)
 	}
 
