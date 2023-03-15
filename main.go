@@ -318,8 +318,7 @@ func (conn *Conn) switchHandler(data RawType, game string, customer string) {
 		break
 	case "click":
 		conn.handleClick(data, game, customer)
-	case "cta":
-	case "ctaClick":
+	case "cta", "ctaClick":
 		conn.handleCtaClick(data, game, customer)
 	case "end":
 		if data.Value == 0 {
@@ -341,15 +340,7 @@ func (conn *Conn) switchHandler(data RawType, game string, customer string) {
 		conn.AggragateEvent(data, []string{"version", "network"}, game, customer, false, "totalTime")
 	case "impression":
 		conn.AggragateEvent(data, []string{"version", "network"}, game, customer, false, "impression")
-	case "gameStarted":
-	case "gameStartTime":
-	case "gameRestarted":
-	case "firstClick":
-	case "firstClickTime":
-	case "gameFinished":
-	case "endGameTime":
-	case "gameWon":
-	case "gameLose":
+	case "gameStarted", "gameStartTime", "gameRestarted", "firstClick", "firstClickTime", "gameFinished", "endGameTime", "gameWon", "gameLose":
 		conn.AggragateEvent(data, []string{"version", "network"}, game, customer, true, data.Event)
 	default:
 		conn.AggragateEvent(data, []string{"version", "network"}, game, customer, false, data.Event)
@@ -512,7 +503,7 @@ func (c *Conn) Listener() {
 			if err != nil {
 				fmt.Printf("couldn't get length of document: %v\n", err)
 			}
-			if count >= 1000000 {
+			if count >= 1e6 {
 				counter++
 				c.queue.PushBack(col)
 			}
